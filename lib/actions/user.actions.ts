@@ -2,26 +2,26 @@
 
 import { revalidatePath } from "next/cache";
 
-import User from "@/lib/database/models/user.model";
+import User, { IUser } from "@/lib/database/models/user.model";
 
 import { connectToDatabase } from "../database/mongoose";
 import { handleError } from "../utils";
 
 // CREATE
-export async function createUser(user: CreateUserParams) {
-  try {
-    console.log('Connecting to database...');
-    await connectToDatabase();
-    console.log('Database connected. Creating user...');
+// lib/actions/user.actions.ts
 
-    const newUser = await User.create(user);
-    console.log('User created successfully:', newUser);
-    return JSON.parse(JSON.stringify(newUser));
-  } catch (error) {
-    console.error('Error in createUser:', error);
-    handleError(error);
-  }
-}
+export const createUser = async (userData: Partial<IUser>) => {
+  await connectToDatabase();
+
+  // Either create new or return existing by clerkId
+  const user = await User.findOneAndUpdate(
+    { clerkId: userData.clerkId },
+    { $setOnInsert: userData },
+    { new: true, upsert: true }
+  );
+
+  return user;
+};
 
 // READ
 export async function getUserById(userId: string) {

@@ -30,9 +30,8 @@ export async function POST(req: Request) {
     });
   }
 
-  // Get the body
-  const payload = await req.json();
-  const body = JSON.stringify(payload);
+  // 🔴 IMPORTANT: use raw text body for Svix verification
+  const body = await req.text();
 
   // Create a new Svix instance with your secret.
   const wh = new Webhook(WEBHOOK_SECRET);
@@ -53,63 +52,74 @@ export async function POST(req: Request) {
     });
   }
 
-  // TODO START CHANGES
-  // Get the ID and type
   const eventType = evt.type;
 
-  // CREATE
-  if (eventType === "user.created") {
-    const { id, email_addresses, image_url, first_name, last_name, username } =
-      evt.data;
+  try {
+    // CREATE
+    if (eventType === "user.created") {
+      const {
+        id,
+        email_addresses,
+        image_url,
+        first_name,
+        last_name,
+        username,
+      } = evt.data;
 
-    const user = {
-      clerkId: id,
-      email: email_addresses[0].email_address,
-      username: username!,
-      firstName: first_name,
-      lastName: last_name,
-      photo: image_url,
-    };
+      const primaryEmail =
+        email_addresses?.[0]?.email_address || "no-email@example.com";
 
-    const newUser = await createUser(user);
+      const user = {
+        clerkId: id,
+        email: primaryEmail,
+        username: username || id, // fallback if username missing
+        firstName: first_name || "",
+        lastName: last_name || "",
+        photo: image_url,
+      };
 
-    // Set public metadata
-    if (newUser) {
-      await clerkClient.users.updateUserMetadata(id, {
-        publicMetadata: {
-          userId: newUser._id,
-        },
-      });
+      const newUser = await createUser(user);
+
+      if (newUser) {
+        await clerkClient.users.updateUserMetadata(id, {
+          publicMetadata: {
+            userId: newUser._id,
+          },
+        });
+      }
+
+      return NextResponse.json({ message: "OK", user: newUser });
     }
 
-    return NextResponse.json({ message: "OK", user: newUser });
+    // UPDATE
+    if (eventType === "user.updated") {
+      const { id, image_url, first_name, last_name, username } = evt.data;
+
+      const user = {
+        firstName: first_name,
+        lastName: last_name,
+        username: username!,
+        photo: image_url,
+      };
+
+      const updatedUser = await updateUser(id, user);
+
+      return NextResponse.json({ message: "OK", user: updatedUser });
+    }
+
+    // DELETE
+    if (eventType === "user.deleted") {
+      const { id } = evt.data;
+
+      const deletedUser = await deleteUser(id!);
+
+      return NextResponse.json({ message: "OK", user: deletedUser });
+    }
+  } catch (err) {
+    console.error("Error in DB action:", err);
+    return new Response("Error while handling webhook event", { status: 500 });
   }
 
-  // UPDATE
-  if (eventType === "user.updated") {
-    const { id, image_url, first_name, last_name, username } = evt.data;
-
-    const user = {
-      firstName: first_name,
-      lastName: last_name,
-      username: username!,
-      photo: image_url,
-    };
-
-    const updatedUser = await updateUser(id, user);
-
-    return NextResponse.json({ message: "OK", user: updatedUser });
-  }
-
-  // DELETE
-  if (eventType === "user.deleted") {
-    const { id } = evt.data;
-
-    const deletedUser = await deleteUser(id!);
-
-    return NextResponse.json({ message: "OK", user: deletedUser });
-  }
-  // TODO END CHANGES
-
+  // For other event types, just return 200 so Clerk is happy
   return new Response("", { status: 200 });
 }
