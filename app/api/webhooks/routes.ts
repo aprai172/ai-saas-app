@@ -1,44 +1,37 @@
 /* eslint-disable camelcase */
-import { clerkClient } from "@clerk/nextjs";
-import { WebhookEvent } from "@clerk/nextjs/server";
+import { Webhook } from "svix";
 import { headers } from "next/headers";
 import { NextResponse } from "next/server";
-import { Webhook } from "svix";
+import { WebhookEvent } from "@clerk/nextjs/server";
+import { clerkClient } from "@clerk/nextjs";
 
-import { createUser, deleteUser, updateUser } from "@/lib/actions/user.actions";
+import { createUser, updateUser, deleteUser } from "@/lib/actions/user.actions";
+
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET as string;
+
+if (!WEBHOOK_SECRET) {
+  throw new Error(
+    "Please add WEBHOOK_SECRET from Clerk Dashboard to your env vars"
+  );
+}
 
 export async function POST(req: Request) {
-  // You can find this in the Clerk Dashboard -> Webhooks -> choose the webhook
-  const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
-
-  if (!WEBHOOK_SECRET) {
-    throw new Error(
-      "Please add WEBHOOK_SECRET from Clerk Dashboard to .env or .env.local"
-    );
-  }
-
-  // Get the headers
+  // 1) Get Svix headers from Clerk
   const headerPayload = headers();
   const svix_id = headerPayload.get("svix-id");
   const svix_timestamp = headerPayload.get("svix-timestamp");
   const svix_signature = headerPayload.get("svix-signature");
 
-  // If there are no headers, error out
   if (!svix_id || !svix_timestamp || !svix_signature) {
-    return new Response("Error occured -- no svix headers", {
-      status: 400,
-    });
+    return new Response("Missing svix headers", { status: 400 });
   }
 
-  // 🔴 IMPORTANT: use raw text body for Svix verification
+  // 2) IMPORTANT: raw body text for Svix verification
   const body = await req.text();
 
-  // Create a new Svix instance with your secret.
   const wh = new Webhook(WEBHOOK_SECRET);
-
   let evt: WebhookEvent;
 
-  // Verify the payload with the headers
   try {
     evt = wh.verify(body, {
       "svix-id": svix_id,
@@ -47,9 +40,7 @@ export async function POST(req: Request) {
     }) as WebhookEvent;
   } catch (err) {
     console.error("Error verifying webhook:", err);
-    return new Response("Error occured", {
-      status: 400,
-    });
+    return new Response("Invalid signature", { status: 400 });
   }
 
   const eventType = evt.type;
@@ -57,14 +48,8 @@ export async function POST(req: Request) {
   try {
     // CREATE
     if (eventType === "user.created") {
-      const {
-        id,
-        email_addresses,
-        image_url,
-        first_name,
-        last_name,
-        username,
-      } = evt.data;
+      const { id, email_addresses, image_url, first_name, last_name, username } =
+        evt.data;
 
       const primaryEmail =
         email_addresses?.[0]?.email_address || "no-email@example.com";
@@ -72,7 +57,7 @@ export async function POST(req: Request) {
       const user = {
         clerkId: id,
         email: primaryEmail,
-        username: username || id, // fallback if username missing
+        username: username || id,
         firstName: first_name || "",
         lastName: last_name || "",
         photo: image_url,
@@ -95,14 +80,14 @@ export async function POST(req: Request) {
     if (eventType === "user.updated") {
       const { id, image_url, first_name, last_name, username } = evt.data;
 
-      const user = {
-        firstName: first_name,
-        lastName: last_name,
-        username: username!,
+      const dataToUpdate = {
+        firstName: first_name || "",
+        lastName: last_name || "",
+        username: username || id,
         photo: image_url,
       };
 
-      const updatedUser = await updateUser(id, user);
+      const updatedUser = await updateUser(id, dataToUpdate);
 
       return NextResponse.json({ message: "OK", user: updatedUser });
     }
@@ -116,10 +101,10 @@ export async function POST(req: Request) {
       return NextResponse.json({ message: "OK", user: deletedUser });
     }
   } catch (err) {
-    console.error("Error in DB action:", err);
-    return new Response("Error while handling webhook event", { status: 500 });
+    console.error("Error while handling webhook event:", err);
+    return new Response("Error while handling webhook", { status: 500 });
   }
 
-  // For other event types, just return 200 so Clerk is happy
-  return new Response("", { status: 200 });
+  // For other Clerk events, just return 200
+  return new Response("Unhandled event type", { status: 200 });
 }
