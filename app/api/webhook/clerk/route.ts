@@ -1,4 +1,4 @@
-/* app/api/webhook/clerk/route.ts */
+/* app/api/webhook/clerk/route.ts  — DEV debug helper (remove after use) */
 import { Webhook } from "svix";
 import { headers } from "next/headers";
 import { NextResponse } from "next/server";
@@ -8,33 +8,27 @@ import { clerkClient } from "@clerk/nextjs";
 import { connectToDatabase } from "@/lib/database/mongoose";
 import { createUser, updateUser, deleteUser } from "@/lib/actions/user.actions";
 
-// ---- Fix TypeScript undefined error + enforce runtime safety ----
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
-if (!WEBHOOK_SECRET) {
-  throw new Error("Missing WEBHOOK_SECRET in environment variables");
-}
+if (!WEBHOOK_SECRET) throw new Error("Missing WEBHOOK_SECRET");
 
-// Create Svix instance safely
 const wh = new Webhook(WEBHOOK_SECRET);
 
 export async function POST(req: Request) {
   try {
-    // 1. Read Svix headers safely
+    // 1. Get headers & raw body
     const h = headers();
     const svixId = h.get("svix-id");
     const svixTimestamp = h.get("svix-timestamp");
     const svixSignature = h.get("svix-signature");
 
-    // ---- Runtime guard fixes your TS error ----
     if (!svixId || !svixTimestamp || !svixSignature) {
-      console.error("Missing svix headers");
+      console.error("Missing svix headers", { svixId, svixTimestamp, svixSignature });
       return new Response("Missing svix headers", { status: 400 });
     }
 
-    // 2. Raw body (required for signature verification)
     const body = await req.text();
 
-    // 3. Verify signature
+    // 2. Verify signature
     let evt: WebhookEvent;
     try {
       evt = wh.verify(body, {
@@ -43,91 +37,106 @@ export async function POST(req: Request) {
         "svix-signature": svixSignature,
       }) as WebhookEvent;
     } catch (err) {
-      console.error("Webhook signature verification failed:", err);
-      return new Response("Invalid signature", { status: 400 });
+      console.error("Signature verify failed:", err);
+      return new Response("Invalid signature: " + String(err), { status: 400 });
     }
 
-    // 4. Connect to DB
+    // 3. Connect to DB (you said this succeeds)
     try {
       await connectToDatabase();
     } catch (err) {
-      console.error("MongoDB connection failed:", err);
-      return new Response("DB connection error", { status: 500 });
+      console.error("DB connect failed:", err);
+      // return the message so Clerk shows it
+      return new Response("DB connect failed: " + (err as any).message || String(err), { status: 500 });
     }
 
-    const type = evt.type;
-    const data: any = evt.data;
+    // 4. Log event data (very useful)
+    console.log("Webhook event type:", evt.type);
+    console.log("Webhook event data (truncated):", JSON.stringify(evt.data).slice(0, 3000));
 
-    // --------------------------
-    //  HANDLE EVENTS
-    // --------------------------
+    // 5. Handle types with guarded try/catch blocks so we can see any thrown error
+    const d: any = evt.data;
 
-    // USER CREATED
-    if (type === "user.created") {
-      const primaryEmail =
-        data.email_addresses?.find(
-          (e: any) => e.id === data.primary_email_address_id
-        )?.email_address ||
-        data.email_addresses?.[0]?.email_address ||
-        "";
-
-      const userPayload = {
-        clerkId: data.id,
-        email: primaryEmail,
-        username: data.username || data.id,
-        firstName: data.first_name || "",
-        lastName: data.last_name || "",
-        photo: data.image_url || data.profile_image_url || "",
-      };
-
-      const newUser = await createUser(userPayload);
-
-      // Try updating Clerk metadata (optional, non-fatal)
+    if (evt.type === "user.created") {
       try {
-        await clerkClient.users.updateUserMetadata(data.id, {
-          publicMetadata: { userId: newUser._id.toString() },
-        });
-      } catch (metaErr) {
-        console.error("Failed updating Clerk metadata:", metaErr);
-        // Do not return error here
+        // robust primary email extraction
+        let primaryEmail = "";
+        if (d.primary_email_address_id && Array.isArray(d.email_addresses)) {
+          const found = d.email_addresses.find((e: any) => e.id === d.primary_email_address_id);
+          primaryEmail = found?.email_address ?? d.email_addresses?.[0]?.email_address ?? "";
+        } else {
+          primaryEmail = d.email_addresses?.[0]?.email_address ?? "";
+        }
+
+        const userPayload = {
+          clerkId: d.id,
+          email: primaryEmail || `${d.id}@no-email.local`,
+          username: d.username || d.id,
+          firstName: d.first_name || "",
+          lastName: d.last_name || "",
+          photo: d.image_url || d.profile_image_url || "",
+        };
+
+        console.log("createUser payload:", JSON.stringify(userPayload));
+
+        let newUser;
+        try {
+          newUser = await createUser(userPayload);
+        } catch (createErr) {
+          console.error("createUser threw:", createErr);
+          // return the error so Clerk shows it
+          return new Response("createUser error: " + ((createErr as any).message || String(createErr)), { status: 500 });
+        }
+
+        // ensure serializable before returning
+        const safeUser = JSON.parse(JSON.stringify(newUser));
+
+        // update clerk metadata — wrap in try/catch (common failure if server key missing)
+        try {
+          await clerkClient.users.updateUserMetadata(d.id, {
+            publicMetadata: { userId: safeUser._id ? String(safeUser._id) : "unknown" },
+          });
+        } catch (metaErr) {
+          console.error("clerkClient.updateUserMetadata failed:", metaErr);
+          // Return this error to show what's wrong (dev-only).
+          return new Response("clerk update metadata error: " + ((metaErr as any).message || String(metaErr)), { status: 500 });
+        }
+
+        return NextResponse.json({ ok: true, user: safeUser });
+      } catch (err) {
+        console.error("Unhandled user.created error:", err);
+        return new Response("Unhandled user.created error: " + ((err as any).message || String(err)), { status: 500 });
       }
-
-      return NextResponse.json({
-        ok: true,
-        event: "user.created",
-        user: newUser,
-      });
     }
 
-    // USER UPDATED
-    if (type === "user.updated") {
-      const updated = await updateUser(data.id, {
-        firstName: data.first_name || "",
-        lastName: data.last_name || "",
-        username: data.username || data.id,
-        photo: data.image_url || "",
-      });
-
-      return NextResponse.json({
-        ok: true,
-        event: "user.updated",
-        user: updated,
-      });
+    if (evt.type === "user.updated") {
+      try {
+        const updated = await updateUser(d.id, {
+          firstName: d.first_name || "",
+          lastName: d.last_name || "",
+          username: d.username || d.id,
+          photo: d.image_url || "",
+        });
+        return NextResponse.json({ ok: true, updated: JSON.parse(JSON.stringify(updated)) });
+      } catch (err) {
+        console.error("updateUser error:", err);
+        return new Response("updateUser error: " + ((err as any).message || String(err)), { status: 500 });
+      }
     }
 
-    // USER DELETED
-    if (type === "user.deleted") {
-      const deleted = await deleteUser(data.id);
-      return NextResponse.json({
-        ok: true,
-        event: "user.deleted",
-        user: deleted,
-      });
+    if (evt.type === "user.deleted") {
+      try {
+        const deleted = await deleteUser(d.id);
+        return NextResponse.json({ ok: true, deleted: JSON.parse(JSON.stringify(deleted)) });
+      } catch (err) {
+        console.error("deleteUser error:", err);
+        return new Response("deleteUser error: " + ((err as any).message || String(err)), { status: 500 });
+      }
     }
 
     return new Response("Unhandled event", { status: 200 });
   } catch (err) {
-    console.error("Unexpected webhook error:", err);
-    return new Response("Internal server error", { status: 500 });
+    console.error("Unexpected top-level error:", err);
+    return new Response("Unexpected error: " + ((err as any).message || String(err)), { status: 500 });
   }
 }
